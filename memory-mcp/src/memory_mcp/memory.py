@@ -1602,6 +1602,9 @@ class MemoryStore:
     ) -> None:
         """因果リンクを追加（単方向、または双方向）.
 
+        同じ (target_id, link_type) ペアのリンクは冪等性が保証され、
+        重複して作成されません。異なる link_type や note は別リンクとして許容されます。
+
         Args:
             source_id: リンク元の記憶ID
             target_id: リンク先の記憶ID

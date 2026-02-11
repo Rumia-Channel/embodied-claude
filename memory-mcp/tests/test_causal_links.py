@@ -153,6 +153,35 @@ class TestCausalLinksIntegration:
         assert len(updated_mem2.links) == 2
 
     @pytest.mark.asyncio
+    async def test_add_causal_link_idempotency_same_note(self, memory_store) -> None:
+        """Test that links with same target_id, link_type, and note are idempotent."""
+        mem1 = await memory_store.save(content="Memory 1")
+        mem2 = await memory_store.save(content="Memory 2")
+
+        # Add same link with same note multiple times
+        await memory_store.add_causal_link(mem2.id, mem1.id, "caused_by", note="Same note")
+        await memory_store.add_causal_link(mem2.id, mem1.id, "caused_by", note="Same note")
+
+        updated_mem2 = await memory_store.get_by_id(mem2.id)
+        assert len(updated_mem2.links) == 1  # Should only be one link
+
+    @pytest.mark.asyncio
+    async def test_add_causal_link_different_notes_same_type(self, memory_store) -> None:
+        """Test that links with same target_id and link_type but different notes are deduplicated."""
+        mem1 = await memory_store.save(content="Memory 1")
+        mem2 = await memory_store.save(content="Memory 2")
+
+        # Add same link type with different notes
+        await memory_store.add_causal_link(mem2.id, mem1.id, "caused_by", note="First note")
+        await memory_store.add_causal_link(mem2.id, mem1.id, "caused_by", note="Second note")
+
+        updated_mem2 = await memory_store.get_by_id(mem2.id)
+        # Same (target_id, link_type) pair should be deduplicated regardless of note
+        assert len(updated_mem2.links) == 1
+        # The first note should be preserved (second call should be ignored)
+        assert updated_mem2.links[0].note == "First note"
+
+    @pytest.mark.asyncio
     async def test_add_causal_link_invalid_source(self, memory_store) -> None:
         """Test adding link with invalid source ID."""
         mem1 = await memory_store.save(content="Memory 1")
@@ -252,3 +281,50 @@ class TestCausalLinksIntegration:
 
         with pytest.raises(ValueError, match="Invalid direction"):
             await memory_store.get_causal_chain(mem.id, "sideways")
+
+    @pytest.mark.asyncio
+    async def test_add_causal_link_bidirectional_idempotency(self, memory_store) -> None:
+        """Test that bidirectional links are also idempotent."""
+        mem1 = await memory_store.save(content="Memory 1")
+        mem2 = await memory_store.save(content="Memory 2")
+
+        # Add bidirectional link twice
+        await memory_store.add_causal_link(mem1.id, mem2.id, "caused_by", bidirectional=True)
+        await memory_store.add_causal_link(mem1.id, mem2.id, "caused_by", bidirectional=True)
+
+        # Check mem1 -> mem2 (caused_by)
+        updated_mem1 = await memory_store.get_by_id(mem1.id)
+        assert len(updated_mem1.links) == 1
+        assert updated_mem1.links[0].target_id == mem2.id
+        assert updated_mem1.links[0].link_type == "caused_by"
+
+        # Check mem2 -> mem1 (leads_to, reverse of caused_by)
+        updated_mem2 = await memory_store.get_by_id(mem2.id)
+        assert len(updated_mem2.links) == 1
+        assert updated_mem2.links[0].target_id == mem1.id
+        assert updated_mem2.links[0].link_type == "leads_to"
+
+    @pytest.mark.asyncio
+    async def test_add_causal_link_bidirectional_symmetry(self, memory_store) -> None:
+        """Test that bidirectional links create symmetric links with correct types."""
+        mem1 = await memory_store.save(content="Cause")
+        mem2 = await memory_store.save(content="Effect")
+
+        # mem1 caused_by mem2 (mem2 is the cause of mem1)
+        await memory_store.add_causal_link(
+            mem1.id, mem2.id, "caused_by", note="Test", bidirectional=True
+        )
+
+        # mem1 should have: caused_by -> mem2
+        updated_mem1 = await memory_store.get_by_id(mem1.id)
+        assert len(updated_mem1.links) == 1
+        assert updated_mem1.links[0].target_id == mem2.id
+        assert updated_mem1.links[0].link_type == "caused_by"
+        assert updated_mem1.links[0].note == "Test"
+
+        # mem2 should have: leads_to -> mem1 (reverse of caused_by)
+        updated_mem2 = await memory_store.get_by_id(mem2.id)
+        assert len(updated_mem2.links) == 1
+        assert updated_mem2.links[0].target_id == mem1.id
+        assert updated_mem2.links[0].link_type == "leads_to"
+        assert updated_mem2.links[0].note == "Test"
