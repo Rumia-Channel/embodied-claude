@@ -980,6 +980,39 @@ class MemoryStore:
 
         return memory
 
+    async def delete_memory(self, memory_id: str) -> bool:
+        """Delete a memory by ID.
+
+        Args:
+            memory_id: ID of the memory to delete
+
+        Returns:
+            True if deleted successfully, False if not found
+        """
+        collection = self._ensure_connected()
+
+        try:
+            # Check if memory exists
+            result = await asyncio.to_thread(
+                collection.get,
+                ids=[memory_id],
+            )
+
+            if not result or not result.get("ids"):
+                return False
+
+            # Delete the memory
+            await asyncio.to_thread(
+                collection.delete,
+                ids=[memory_id],
+            )
+
+            logger.info(f"Deleted memory: {memory_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete memory {memory_id}: {e}")
+            return False
+
     async def _add_bidirectional_link(
         self,
         source_id: str,

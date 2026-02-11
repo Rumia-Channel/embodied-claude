@@ -766,6 +766,34 @@ class MemoryMCPServer:
                     },
                 ),
                 Tool(
+                    name="delete_job",
+                    description="Delete a job configuration.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "job_id": {
+                                "type": "string",
+                                "description": "ID of the job to delete",
+                            },
+                        },
+                        "required": ["job_id"],
+                    },
+                ),
+                Tool(
+                    name="delete_memory",
+                    description="Delete a memory by ID.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "memory_id": {
+                                "type": "string",
+                                "description": "ID of the memory to delete",
+                            },
+                        },
+                        "required": ["memory_id"],
+                    },
+                ),
+                Tool(
                     name="create_shared_group",
                     description="Create a shared memory group for sharing memories between multiple jobs.",
                     inputSchema={
@@ -1590,6 +1618,50 @@ Date Range:
                             )
 
                         return [TextContent(type="text", text="\n".join(output_lines))]
+
+                    case "delete_job":
+                        job_id = arguments.get("job_id", "")
+                        if not job_id:
+                            return [TextContent(type="text", text="Error: job_id is required")]
+
+                        success = await self._memory_store.delete_job(job_id=job_id)
+
+                        if success:
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Job '{job_id}' deleted successfully",
+                                )
+                            ]
+                        else:
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Error: Job '{job_id}' not found",
+                                )
+                            ]
+
+                    case "delete_memory":
+                        memory_id = arguments.get("memory_id", "")
+                        if not memory_id:
+                            return [TextContent(type="text", text="Error: memory_id is required")]
+
+                        success = await self._memory_store.delete_memory(memory_id=memory_id)
+
+                        if success:
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Memory '{memory_id}' deleted successfully",
+                                )
+                            ]
+                        else:
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Error: Memory '{memory_id}' not found",
+                                )
+                            ]
 
                     case "create_shared_group":
                         group_id = arguments.get("group_id", "")
