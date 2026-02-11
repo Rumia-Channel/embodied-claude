@@ -426,29 +426,9 @@ class MemoryStore:
             )
 
             if include_shared:
-                # このジョブが参照する共有グループの記憶
-                job_config = self._job_configs.get(job_id)
-                if job_config and job_config.shared_group_ids:
-                    # カンマ区切り文字列として保存されているため、部分マッチではなく
-                    # 正確なマッチまたは境界を考慮した検索が必要
-                    # 例: "group1" が "group1,group2" にマッチするが "group10" にはマッチしない
-                    shared_conditions: list[dict[str, Any]] = [{"memory_type": {"$eq": "shared"}}]
-                    group_conditions: list[dict[str, Any]] = []
-                    for group_id in job_config.shared_group_ids:
-                        # カンマ区切り文字列内での正確なマッチを確保
-                        # パターン: ",group_id," または先頭 "group_id," または末尾 ",group_id" または完全一致 "group_id"
-                        group_conditions.append(
-                            {"shared_group_ids": {"$eq": group_id}}  # 単一グループの場合
-                        )
-                        group_conditions.append(
-                            {"shared_group_ids": {"$contains": f"{group_id},"}}  # 先頭または中間
-                        )
-                        group_conditions.append(
-                            {"shared_group_ids": {"$contains": f",{group_id}"}}  # 末尾または中間
-                        )
-                    if group_conditions:
-                        shared_conditions.append({"$or": group_conditions})
-                    job_conditions.append({"$and": shared_conditions})
+                # 共有メモリも検索対象に含める
+                # ChromaDBの制約により、shared_group_idsの部分一致は後でフィルタリング
+                job_conditions.append({"memory_type": {"$eq": "shared"}})
 
         if job_conditions:
             if len(job_conditions) == 1:
@@ -462,10 +442,13 @@ class MemoryStore:
         elif len(where_conditions) > 1:
             where = {"$and": where_conditions}
 
+        # 多めに取得して、共有メモリのフィルタリング後にn_resultsに絞る
+        fetch_count = n_results * 3 if (job_id and include_shared) else n_results
+
         results = await asyncio.to_thread(
             collection.query,
             query_texts=[query],
-            n_results=n_results,
+            n_results=fetch_count,
             where=where,
         )
 
@@ -477,12 +460,29 @@ class MemoryStore:
             metadatas = results.get("metadatas", [[]])[0]
             distances = results.get("distances", [[]])[0]
 
+            # ジョブが参照する共有グループIDを取得
+            allowed_shared_groups: set[str] = set()
+            if job_id and include_shared:
+                job_config = self._job_configs.get(job_id)
+                if job_config and job_config.shared_group_ids:
+                    allowed_shared_groups = set(job_config.shared_group_ids)
+
             for i, memory_id in enumerate(ids):
                 metadata = metadatas[i] if i < len(metadatas) else {}
                 content = documents[i] if i < len(documents) else ""
                 memory = _memory_from_metadata(memory_id, content, metadata)
                 distance = distances[i] if i < len(distances) else 0.0
+
+                # 共有メモリの場合、shared_group_idsの所有権を検証
+                if memory.memory_type == "shared" and job_id and include_shared:
+                    memory_group_ids = set(memory.shared_group_ids)
+                    if not memory_group_ids.intersection(allowed_shared_groups):
+                        continue  # このジョブが参照していない共有グループの記憶はスキップ
+
                 search_results.append(MemorySearchResult(memory=memory, distance=distance))
+
+                if len(search_results) >= n_results:
+                    break
 
         return search_results
 
@@ -564,18 +564,9 @@ class MemoryStore:
             )
 
             if include_shared:
-                # このジョブが参照する共有グループの記憶
-                job_config = self._job_configs.get(job_id)
-                if job_config and job_config.shared_group_ids:
-                    shared_conditions: list[dict[str, Any]] = [{"memory_type": {"$eq": "shared"}}]
-                    group_conditions: list[dict[str, Any]] = []
-                    for group_id in job_config.shared_group_ids:
-                        group_conditions.append({"shared_group_ids": {"$eq": group_id}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f"{group_id},"}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f",{group_id}"}})
-                    if group_conditions:
-                        shared_conditions.append({"$or": group_conditions})
-                    job_conditions.append({"$and": shared_conditions})
+                # 共有メモリも検索対象に含める
+                # ChromaDBの制約により、shared_group_idsの部分一致は後でフィルタリング
+                job_conditions.append({"memory_type": {"$eq": "shared"}})
 
         if job_conditions:
             if len(job_conditions) == 1:
@@ -596,6 +587,13 @@ class MemoryStore:
 
         memories: list[Memory] = []
 
+        # ジョブが参照する共有グループIDを取得
+        allowed_shared_groups: set[str] = set()
+        if job_id and include_shared:
+            job_config = self._job_configs.get(job_id)
+            if job_config and job_config.shared_group_ids:
+                allowed_shared_groups = set(job_config.shared_group_ids)
+
         if results and results.get("ids"):
             ids = results["ids"]
             documents = results.get("documents", [])
@@ -605,6 +603,13 @@ class MemoryStore:
                 metadata = metadatas[i] if i < len(metadatas) else {}
                 content = documents[i] if i < len(documents) else ""
                 memory = _memory_from_metadata(memory_id, content, metadata)
+
+                # 共有メモリの場合、shared_group_idsの所有権を検証
+                if memory.memory_type == "shared" and job_id and include_shared:
+                    memory_group_ids = set(memory.shared_group_ids)
+                    if not memory_group_ids.intersection(allowed_shared_groups):
+                        continue  # このジョブが参照していない共有グループの記憶はスキップ
+
                 memories.append(memory)
 
         # Sort by timestamp (newest first) and limit
@@ -648,18 +653,9 @@ class MemoryStore:
             )
 
             if include_shared:
-                # このジョブが参照する共有グループの記憶
-                job_config = self._job_configs.get(job_id)
-                if job_config and job_config.shared_group_ids:
-                    shared_conditions: list[dict[str, Any]] = [{"memory_type": {"$eq": "shared"}}]
-                    group_conditions: list[dict[str, Any]] = []
-                    for group_id in job_config.shared_group_ids:
-                        group_conditions.append({"shared_group_ids": {"$eq": group_id}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f"{group_id},"}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f",{group_id}"}})
-                    if group_conditions:
-                        shared_conditions.append({"$or": group_conditions})
-                    job_conditions.append({"$and": shared_conditions})
+                # 共有メモリも検索対象に含める
+                # ChromaDBの制約により、shared_group_idsの部分一致は後でフィルタリング
+                job_conditions.append({"memory_type": {"$eq": "shared"}})
 
         where: dict[str, Any] | None = None
         if job_conditions:
@@ -670,12 +666,31 @@ class MemoryStore:
 
         results = await asyncio.to_thread(collection.get, where=where)
 
-        total_count = len(results.get("ids", []))
+        # ジョブが参照する共有グループIDを取得
+        allowed_shared_groups: set[str] = set()
+        if job_id and include_shared:
+            job_config = self._job_configs.get(job_id)
+            if job_config and job_config.shared_group_ids:
+                allowed_shared_groups = set(job_config.shared_group_ids)
+
+        total_count = 0
         by_category: dict[str, int] = {}
         by_emotion: dict[str, int] = {}
         timestamps: list[str] = []
 
-        for metadata in results.get("metadatas", []):
+        metadatas = results.get("metadatas", [])
+        for metadata in metadatas:
+            # 共有メモリの場合、shared_group_idsの所有権を検証
+            memory_type = metadata.get("memory_type", "global")
+            if memory_type == "shared" and job_id and include_shared:
+                shared_group_ids_str = metadata.get("shared_group_ids", "")
+                memory_group_ids = set(
+                    id.strip() for id in shared_group_ids_str.split(",") if id.strip()
+                )
+                if not memory_group_ids.intersection(allowed_shared_groups):
+                    continue  # このジョブが参照していない共有グループの記憶はスキップ
+
+            total_count += 1
             category = metadata.get("category", "daily")
             emotion = metadata.get("emotion", "neutral")
             timestamp = metadata.get("timestamp", "")
@@ -763,28 +778,9 @@ class MemoryStore:
             )
 
             if include_shared:
-                # このジョブが参照する共有グループの記憶
-                job_config = self._job_configs.get(job_id)
-                if job_config and job_config.shared_group_ids:
-                    # カンマ区切り文字列として保存されているため、部分マッチではなく
-                    # 正確なマッチまたは境界を考慮した検索が必要
-                    shared_conditions: list[dict[str, Any]] = [{"memory_type": {"$eq": "shared"}}]
-                    group_conditions: list[dict[str, Any]] = []
-                    for group_id in job_config.shared_group_ids:
-                        # カンマ区切り文字列内での正確なマッチを確保
-                        # パターン: ",group_id," または先頭 "group_id," または末尾 ",group_id" または完全一致 "group_id"
-                        group_conditions.append(
-                            {"shared_group_ids": {"$eq": group_id}}  # 単一グループの場合
-                        )
-                        group_conditions.append(
-                            {"shared_group_ids": {"$contains": f"{group_id},"}}  # 先頭または中間
-                        )
-                        group_conditions.append(
-                            {"shared_group_ids": {"$contains": f",{group_id}"}}  # 末尾または中間
-                        )
-                    if group_conditions:
-                        shared_conditions.append({"$or": group_conditions})
-                    job_conditions.append({"$and": shared_conditions})
+                # 共有メモリも検索対象に含める
+                # ChromaDBの制約により、shared_group_idsの部分一致は後でフィルタリング
+                job_conditions.append({"memory_type": {"$eq": "shared"}})
 
         if job_conditions:
             if len(job_conditions) == 1:
@@ -799,7 +795,8 @@ class MemoryStore:
             where = {"$and": where_conditions}
 
         # 多めに取得してリスコアリング後にn_resultsに絞る
-        fetch_count = min(n_results * 3, 50)
+        # 共有メモリのフィルタリングを考慮してさらに多めに取得
+        fetch_count = min(n_results * 5 if (job_id and include_shared) else n_results * 3, 50)
 
         results = await asyncio.to_thread(
             collection.query,
@@ -811,6 +808,13 @@ class MemoryStore:
         scored_results: list[ScoredMemory] = []
         now = datetime.now()
 
+        # ジョブが参照する共有グループIDを取得
+        allowed_shared_groups: set[str] = set()
+        if job_id and include_shared:
+            job_config = self._job_configs.get(job_id)
+            if job_config and job_config.shared_group_ids:
+                allowed_shared_groups = set(job_config.shared_group_ids)
+
         if results and results.get("ids") and results["ids"][0]:
             ids = results["ids"][0]
             documents = results.get("documents", [[]])[0]
@@ -821,6 +825,12 @@ class MemoryStore:
                 metadata = metadatas[i] if i < len(metadatas) else {}
                 content = documents[i] if i < len(documents) else ""
                 memory = _memory_from_metadata(memory_id, content, metadata)
+
+                # 共有メモリの場合、shared_group_idsの所有権を検証
+                if memory.memory_type == "shared" and job_id and include_shared:
+                    memory_group_ids = set(memory.shared_group_ids)
+                    if not memory_group_ids.intersection(allowed_shared_groups):
+                        continue  # このジョブが参照していない共有グループの記憶はスキップ
 
                 semantic_distance = distances[i] if i < len(distances) else 0.0
 
@@ -852,6 +862,9 @@ class MemoryStore:
                         final_score=final_score,
                     )
                 )
+
+                if len(scored_results) >= n_results:
+                    break
 
         # final_score昇順でソート
         scored_results.sort(key=lambda x: x.final_score)
@@ -1387,18 +1400,9 @@ class MemoryStore:
             )
 
             if include_shared:
-                # このジョブが参照する共有グループの記憶
-                job_config = self._job_configs.get(job_id)
-                if job_config and job_config.shared_group_ids:
-                    shared_conditions: list[dict[str, Any]] = [{"memory_type": {"$eq": "shared"}}]
-                    group_conditions: list[dict[str, Any]] = []
-                    for group_id in job_config.shared_group_ids:
-                        group_conditions.append({"shared_group_ids": {"$eq": group_id}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f"{group_id},"}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f",{group_id}"}})
-                    if group_conditions:
-                        shared_conditions.append({"$or": group_conditions})
-                    job_conditions.append({"$and": shared_conditions})
+                # 共有メモリも検索対象に含める
+                # ChromaDBの制約により、shared_group_idsの部分一致は後でフィルタリング
+                job_conditions.append({"memory_type": {"$eq": "shared"}})
 
         if job_conditions:
             if len(job_conditions) == 1:
@@ -1416,11 +1420,26 @@ class MemoryStore:
         )
 
         memories: list[Memory] = []
+
+        # ジョブが参照する共有グループIDを取得
+        allowed_shared_groups: set[str] = set()
+        if job_id and include_shared:
+            job_config = self._job_configs.get(job_id)
+            if job_config and job_config.shared_group_ids:
+                allowed_shared_groups = set(job_config.shared_group_ids)
+
         if results and results.get("ids"):
             for i, memory_id in enumerate(results["ids"]):
                 content = results["documents"][i] if results.get("documents") else ""
                 metadata = results["metadatas"][i] if results.get("metadatas") else {}
                 memory = _memory_from_metadata(memory_id, content, metadata)
+
+                # 共有メモリの場合、shared_group_idsの所有権を検証
+                if memory.memory_type == "shared" and job_id and include_shared:
+                    memory_group_ids = set(memory.shared_group_ids)
+                    if not memory_group_ids.intersection(allowed_shared_groups):
+                        continue  # このジョブが参照していない共有グループの記憶はスキップ
+
                 memories.append(memory)
 
         # 最新順にソート
@@ -1464,18 +1483,9 @@ class MemoryStore:
             )
 
             if include_shared:
-                # このジョブが参照する共有グループの記憶
-                job_config = self._job_configs.get(job_id)
-                if job_config and job_config.shared_group_ids:
-                    shared_conditions: list[dict[str, Any]] = [{"memory_type": {"$eq": "shared"}}]
-                    group_conditions: list[dict[str, Any]] = []
-                    for group_id in job_config.shared_group_ids:
-                        group_conditions.append({"shared_group_ids": {"$eq": group_id}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f"{group_id},"}})
-                        group_conditions.append({"shared_group_ids": {"$contains": f",{group_id}"}})
-                    if group_conditions:
-                        shared_conditions.append({"$or": group_conditions})
-                    job_conditions.append({"$and": shared_conditions})
+                # 共有メモリも検索対象に含める
+                # ChromaDBの制約により、shared_group_idsの部分一致は後でフィルタリング
+                job_conditions.append({"memory_type": {"$eq": "shared"}})
 
         where: dict[str, Any] | None = None
         if job_conditions:
@@ -1490,11 +1500,26 @@ class MemoryStore:
         )
 
         memories: list[Memory] = []
+
+        # ジョブが参照する共有グループIDを取得
+        allowed_shared_groups: set[str] = set()
+        if job_id and include_shared:
+            job_config = self._job_configs.get(job_id)
+            if job_config and job_config.shared_group_ids:
+                allowed_shared_groups = set(job_config.shared_group_ids)
+
         if results and results.get("ids"):
             for i, memory_id in enumerate(results["ids"]):
                 content = results["documents"][i] if results.get("documents") else ""
                 metadata = results["metadatas"][i] if results.get("metadatas") else {}
                 memory = _memory_from_metadata(memory_id, content, metadata)
+
+                # 共有メモリの場合、shared_group_idsの所有権を検証
+                if memory.memory_type == "shared" and job_id and include_shared:
+                    memory_group_ids = set(memory.shared_group_ids)
+                    if not memory_group_ids.intersection(allowed_shared_groups):
+                        continue  # このジョブが参照していない共有グループの記憶はスキップ
+
                 memories.append(memory)
 
         return memories
@@ -2167,6 +2192,19 @@ class MemoryStore:
             member_job_ids=member_job_ids,
         )
         self._shared_groups[group_id] = group_config
+
+        # Also update each member job's shared_group_ids to include this new group
+        for job_id in member_job_ids:
+            job = self._job_configs.get(job_id)
+            if job is not None and group_id not in job.shared_group_ids:
+                new_ids = tuple(list(job.shared_group_ids) + [group_id])
+                self._job_configs[job_id] = JobConfig(
+                    job_id=job.job_id,
+                    name=job.name,
+                    description=job.description,
+                    shared_group_ids=new_ids,
+                )
+
         return group_config
 
     async def get_shared_group(self, group_id: str) -> SharedGroupConfig | None:
@@ -2235,4 +2273,34 @@ class MemoryStore:
                 member_job_ids=new_members,
             )
 
+        return True
+
+    async def delete_shared_group(self, group_id: str) -> bool:
+        """Delete a shared group.
+        
+        Args:
+            group_id: ID of the shared group to delete
+            
+        Returns:
+            True if deleted successfully, False if group not found
+        """
+        group = self._shared_groups.get(group_id)
+        if group is None:
+            return False
+        
+        # Remove this group from all member jobs' shared_group_ids
+        for job_id in group.member_job_ids:
+            job = self._job_configs.get(job_id)
+            if job is not None and group_id in job.shared_group_ids:
+                new_ids = tuple([gid for gid in job.shared_group_ids if gid != group_id])
+                self._job_configs[job_id] = JobConfig(
+                    job_id=job.job_id,
+                    name=job.name,
+                    description=job.description,
+                    shared_group_ids=new_ids,
+                )
+        
+        # Delete the group
+        del self._shared_groups[group_id]
+        
         return True

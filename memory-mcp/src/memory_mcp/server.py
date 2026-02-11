@@ -837,6 +837,20 @@ class MemoryMCPServer:
                         "required": ["job_id", "group_id"],
                     },
                 ),
+                Tool(
+                    name="delete_shared_group",
+                    description="Delete a shared memory group. This will remove the group and update all member jobs.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "group_id": {
+                                "type": "string",
+                                "description": "ID of the shared group to delete",
+                            },
+                        },
+                        "required": ["group_id"],
+                    },
+                ),
             ]
 
         @self._server.call_tool()
@@ -1656,6 +1670,28 @@ Date Range:
                                 TextContent(
                                     type="text",
                                     text=f"Error: Job '{job_id}' or group '{group_id}' not found",
+                                )
+                            ]
+
+                    case "delete_shared_group":
+                        group_id = arguments.get("group_id", "")
+                        if not group_id:
+                            return [TextContent(type="text", text="Error: group_id is required")]
+
+                        success = await self._memory_store.delete_shared_group(group_id=group_id)
+
+                        if success:
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Shared group '{group_id}' deleted successfully",
+                                )
+                            ]
+                        else:
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Error: Shared group '{group_id}' not found",
                                 )
                             ]
 
